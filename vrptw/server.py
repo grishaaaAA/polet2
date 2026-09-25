@@ -1694,7 +1694,22 @@ class Stand:
                           for код, имя in EQUIPMENT.items()],
         }
 
-    def list_runs(self) -> dict:
+    def list_runs(self, скрытые: bool = False) -> dict:
+        """Архив для списка. Скрытые записи по умолчанию не приходят.
+
+        День пересчитывают по многу раз, и архив зарастает черновиками:
+        у окна интерфейса их набралось десять по одной зоне, а справочники
+        оно собирает из этого списка. Удалять расчёты движок по-прежнему
+        не умеет — историю счёта затирать нельзя, — но прятать из списка
+        может: запись остаётся на диске, открывается по своему `id` и
+        возвращается сюда флагом обратно.
+
+        Фильтр стоит **только здесь**. `_load_runs` и `self._runs`
+        отдают архив целиком, и это не мелочь: по ним `uploads.удалить`
+        решает, есть ли по выгрузке расчёты. Отфильтруй скрытых там — и
+        выгрузку с расчётами стало бы можно убрать, а расчёты остались бы
+        без дня.
+        """
         # Записям, заведённым до появления поля, оно достаётся здесь:
         # оно выводится из самой записи, поэтому старый архив переписывать
         # незачем — а интерфейсу нужно, чтобы поле было у всех.
@@ -1704,9 +1719,15 @@ class Stand:
         with self._lock:
             записи = [{**(r if "forms" in r
                           else {**r, "forms": self._формы_записи(r)}),
-                       **_чем_считано(r, план_с_диска=False)}
-                      for r in self._runs]
-        return {"runs": записи}
+                       **_чем_считано(r, план_с_диска=False),
+                       "скрыт": bool(r.get("скрыт"))}
+                      for r in self._runs
+                      if скрытые or not r.get("скрыт")]
+        return {"runs": записи, "скрытых": self._скрытых()}
+
+    def _скрытых(self) -> int:
+        with self._lock:
+            return sum(1 for r in self._runs if r.get("скрыт"))
 
     def _run(self, run_id: str) -> dict:
         with self._lock:
@@ -1861,6 +1882,40 @@ class Stand:
         # другого окна уже после того, как это загрузило свой список.
         осталось = self._изменить_сравнения(убрать)
         return {"deleted": compare_id, "left": осталось}
+
+    def hide_run(self, run_id: str, скрыт: bool) -> dict:
+        """Убрать расчёт из списка или вернуть его обратно.
+
+        Не удаление: запись, её журнал и её план остаются на диске, а
+        `GET /api/runs/<id>` открывает её как открывал. Меняется ровно
+        одно — приходит ли она в `GET /api/runs`; чтобы увидеть
+        спрятанное, у списка есть `?hidden=1`.
+
+        Отказывать тут не в чем, и это следствие выбора в пользу
+        скрытия. У настоящего удаления пришлось бы сторожить две вещи:
+        сохранённое сравнение, ссылающееся на запись, и пересчёт,
+        для которого она основа. Сравнение хранит снимок расчётов, а не
+        ссылки (`save_compare`), и переживает что угодно; пересчёт
+        поднимает основу по `id` через `_run`, который скрытых не
+        отличает. Так что не ломается ни то, ни другое.
+
+        Коды записей тоже поэтому целы. Номер выдаётся как «длина списка
+        плюс один», и удали кто-нибудь R003 из десяти — следующий расчёт
+        получил бы код R010, который уже занят. Скрытая запись из списка
+        не уходит, и считать заново нечего.
+        """
+        def пометить(текущие: list) -> dict:
+            for r in текущие:
+                if r["id"] == run_id:
+                    if скрыт:
+                        r["скрыт"] = True
+                    else:
+                        r.pop("скрыт", None)
+                    return {**r, "скрыт": bool(скрыт)}
+            raise NotFound(f"расчёта {run_id!r} в архиве нет")
+
+        запись = self._изменить_архив(пометить)
+        return {**запись, "скрытых": self._скрытых()}
 
     def note_run(self, run_id: str, note: str) -> dict:
         def подписать(текущие: list) -> dict:
@@ -2027,7 +2082,10 @@ class Handler(BaseHTTPRequestHandler):
             # Архив расчётов. Пути без префикса `/api` интерфейс не
             # знает: у него один адрес движка и один префикс.
             if path == "/api/runs":
-                return self._send(STAND.list_runs())
+                # `?hidden=1` — показать и спрятанные, с флагом у каждой.
+                # Без него список отвечает на «что у нас есть», а
+                # спрятанное человек прятал сам.
+                return self._send(STAND.list_runs("hidden" in query))
             if path == "/api/compares":
                 return self._send(STAND.list_compares())
             if path.startswith("/api/runs/"):
@@ -2188,6 +2246,14 @@ class Handler(BaseHTTPRequestHandler):
                 run_id = unquote(path[len("/api/runs/"):-len("/note")])
                 return self._send(STAND.note_run(run_id, body.get("note", "")))
 
+            if path.startswith("/api/runs/") and path.endswith("/hidden"):
+                run_id = unquote(path[len("/api/runs/"):-len("/hidden")])
+                # Путь не DELETE нарочно: DELETE обещал бы удаление,
+                # а запись остаётся на диске. Обещать надо то, что
+                # делаешь.
+                return self._send(STAND.hide_run(
+                    run_id, bool(body.get("скрыт", True))))
+
             if path == "/api/event":
                 return self._send(STAND.record(day_of_body(), body,
                                                body.get("base") or None))
@@ -2345,6 +2411,10 @@ class Handler(BaseHTTPRequestHandler):
                 "GET /api/runs/<id>": "запись расчёта и все четыре формы",
                 "GET /api/runs/<id>/<форма>": "одна форма отдельно",
                 "POST /api/runs/<id>/note": "заметка человека к расчёту",
+                "POST /api/runs/<id>/hidden":
+                    "{скрыт: true} — убрать расчёт из списка, {скрыт: false} — "
+                    "вернуть; запись остаётся на диске и открывается по id",
+                "GET /api/runs?hidden=1": "архив вместе со спрятанными",
                 "GET /api/compares": "сохранённые сравнения расчётов",
                 "POST /api/compares":
                     "сохранить сравнение: {runs: [{id, code, ...}, ...]}, "
@@ -2544,6 +2614,17 @@ def check():
             payload = json.load(resp)
         return payload, time.time() - t0
 
+    def post_any(path: str, body: dict):
+        """`post`, у которого отказ — тоже ответ, парой к `get_any`."""
+        req = urllib.request.Request(
+            _url(path), data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                return json.load(resp), 200
+        except urllib.error.HTTPError as exc:
+            return json.loads(exc.read().decode("utf-8")), exc.code
+
     def delete(path: str):
         req = urllib.request.Request(base + path, method="DELETE")
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -2681,6 +2762,35 @@ def check():
             runs_ok += 1
         else:
             print("  ✗ POST /api/runs/<id>/note"); failed += 1
+
+        # Спрятать черновик и вернуть его. День пересчитывают по многу
+        # раз, архив зарастает, а интерфейс собирает из него справочники.
+        # Проверяем все четыре обещания разом: из списка ушёл, под
+        # `?hidden=1` виден с флагом, по своему `id` открывается как
+        # открывался, флагом возвращается обратно.
+        спрятан, кс = post_any(f"/api/runs/{rid}/hidden", {"скрыт": True})
+        видно = [r["id"] for r in get("/api/runs")[0]["runs"]]
+        всё = {r["id"]: r for r in get("/api/runs?hidden=1")[0]["runs"]}
+        открыт, ко_ = get_any(f"/api/runs/{rid}")
+        вернули, кв = post_any(f"/api/runs/{rid}/hidden", {"скрыт": False})
+        снова_видно = [r["id"] for r in get("/api/runs")[0]["runs"]]
+        # Несуществующий `id` — латиницей: `_url` кодирует только
+        # значения в `?…`, и кириллический путь без запроса уронил бы
+        # `urllib` UnicodeEncodeError ещё до отправки.
+        _, кн_ = post_any("/api/runs/no-such-run/hidden", {"скрыт": True})
+        if (кс == 200 and спрятан.get("скрыт") is True and rid not in видно
+                and всё.get(rid, {}).get("скрыт") is True
+                and ко_ == 200 and открыт["run"]["id"] == rid
+                and кв == 200 and вернули.get("скрыт") is False
+                and rid in снова_видно and кн_ == 404):
+            print(f"  ✓ {'расчёт прячется и возвращается':<38}"
+                  f"из списка ушёл, по id открыт, чужой id — 404")
+            runs_ok += 1
+        else:
+            print(f"  ✗ скрытие расчёта: коды {[кс, ко_, кв, кн_]}, "
+                  f"в списке {rid in видно}→{rid in снова_видно}, "
+                  f"под ?hidden={всё.get(rid, {}).get('скрыт')}")
+            failed += 1
 
         # Сохранение пересчёта. Интерфейс сперва зовёт /replan, потом
         # кладёт увиденное в архив — движок обязан взять готовое из кэша,
@@ -4550,6 +4660,14 @@ def _проверка_выгрузок(base: str) -> tuple[int, int]:
 
         # 7. Выгрузку с расчётом не удалить — без неё он не откроется; без
         # расчётов — удаляется, и день больше не опознаётся.
+        #
+        # Расчёт по выгрузке перед этим **прячем**. Держит выгрузку он всё
+        # равно: «скрыт» — это про список, а не про то, есть расчёт или
+        # нет. Отфильтруй скрытых в `_load_runs` — и выгрузку стало бы
+        # можно убрать из-под живого расчёта, а тот остался бы без дня.
+        # Проверено покраснением: с фильтром в `_load_runs` здесь
+        # приходит 200 вместо 409.
+        запрос("POST", f"/api/runs/{расчёт.get('id')}/hidden", {"скрыт": True})
         _, кд1 = запрос("DELETE", f"/api/uploads/{часть.get('day')}")
         _, кд2 = запрос("DELETE", f"/api/uploads/{зн.get('day')}")
         _, кд3 = запрос("GET", f"/api/plan?day={зн.get('day')}")
