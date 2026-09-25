@@ -32,6 +32,7 @@ import errno
 import hashlib
 import json
 import random
+import os
 import sys
 import threading
 import time
@@ -2501,7 +2502,7 @@ def check():
     print("Проверка сервера\n")
     Handler.log_message = lambda *a, **k: None   # без построчного лога запросов
     STAND = Stand()
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = Стенд(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}"
 
@@ -4604,6 +4605,39 @@ def готовые() -> int:
     return 0
 
 
+class Стенд(ThreadingHTTPServer):
+    """HTTP-сервер стенда. Отличается от базового одним: на Windows не
+    позволяет встать на уже занятый порт.
+
+    `HTTPServer` ставит `allow_reuse_address = 1`, и на POSIX это значит
+    «можно переиспользовать адрес в TIME_WAIT» — ровно то, что нужно,
+    чтобы перезапустить стенд сразу после остановки. На Windows тот же
+    флаг значит другое: **привязаться к порту, который уже кто-то
+    слушает**, если первый не взял `SO_EXCLUSIVEADDRUSE` (а Python его не
+    берёт). Тогда два стенда встают на один порт, и запросы уходят то в
+    один, то в другой.
+
+    То есть вся ветка «порт уже слушают» из `объяснить_порт` — её
+    доводили 23 сентября и сторожит `selfcheck._объяснение_порта` — на
+    Windows не срабатывала бы никогда, а вместо понятного сообщения
+    проверяющий получал бы молча странное поведение. Ровно тот случай,
+    ради которого ветка и написана.
+
+    Живьём на Windows не проверено: машины нет. Проверено, что класс
+    выбирает нужное значение по `os.name` (`selfcheck._порт_на_windows`).
+    """
+
+    @property
+    def allow_reuse_address(self):          # type: ignore[override]
+        return os.name != "nt"
+
+    @allow_reuse_address.setter
+    def allow_reuse_address(self, значение):
+        # `HTTPServer.__init__` ничего не присваивает, но базовый класс
+        # объявляет это полем — оставляем присваивание безвредным.
+        pass
+
+
 def объяснить_порт(port: int, дни: str, exc: OSError) -> list[str]:
     """
     Почему порт не открылся — словами и с готовой командой.
@@ -4654,7 +4688,7 @@ def main():
     # делать. Сокет слушает, пока строится сеть: `serve_forever` ещё не
     # начат, и ранние запросы просто ждут в очереди, а не получают отказ.
     try:
-        server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+        server = Стенд(("0.0.0.0", port), Handler)
     except OSError as exc:
         дни = sys.argv[2] if len(sys.argv) > 2 else "восток,юго-восток,югоцентр"
         for строка in объяснить_порт(port, дни, exc):
