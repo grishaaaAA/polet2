@@ -83,7 +83,7 @@ python3 -m vrptw.server 8000 восток,юго-восток,югоцентр
 
 ```bash
 python3 -m vrptw.selfcheck        # ~40 с: весь путь движка, 56 отметок
-python3 -m vrptw.server check     # около 7 мин: все ручки, 80 отметок
+python3 -m vrptw.server check     # около 7 мин: все ручки, 81 отметка
 zsh проверка-с-нуля.sh            # клон репозитория с нуля — то, что увидите вы
 ```
 
