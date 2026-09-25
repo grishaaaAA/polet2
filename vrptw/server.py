@@ -1994,6 +1994,17 @@ class Handler(BaseHTTPRequestHandler):
                 ready = [r[len("зона-"):] if r.startswith("зона-")
                          else str(int(r)) for r in ready]
                 выгрузки = uploads.список()
+                # Выгрузка, которую удалили, из `ready` уходит. Файлы
+                # кэша переживают удаление самой выгрузки (см. `do_DELETE`
+                # — там они теперь тоже убираются, но старые остались, и
+                # чужой кэш никто не обещал), а `ready` строится обходом
+                # имён в кэше. Получался призрак: день числился готовым,
+                # а `GET /api/plan` по нему отвечал 400 «выгрузки нет».
+                # Интерфейс, сделанный по букве контракта, показывал его
+                # в списке и получал отказ по нажатию.
+                живые = {в["day"] for в in выгрузки}
+                ready = [r for r in ready
+                         if not r.startswith(uploads.ПРЕФИКС) or r in живые]
                 return self._send({
                     "ready": sorted(set(ready)),
                     "zones": list(ZONES),
@@ -2233,7 +2244,20 @@ class Handler(BaseHTTPRequestHandler):
                 # Выгрузка — не история счёта, а принесённый файл: его можно
                 # убрать, пока по нему нет расчётов (`uploads.удалить`).
                 ident = unquote(path[len("/api/uploads/"):])
-                return self._send(uploads.удалить(ident, STAND._load_runs()))
+                ответ = uploads.удалить(ident, STAND._load_runs())
+                # Вместе с выгрузкой уходят и производные от неё файлы
+                # кэша: без них они копились молча (на этой машине их
+                # набралось 95 штук от давно удалённых выгрузок) и
+                # оставляли в `ready` призраков. Кэш — производное, его
+                # можно пересчитать; в отличие от архива расчётов,
+                # который удалять нельзя и который `uploads.удалить`
+                # проверяет до нас.
+                убрано = 0
+                for каталог in (CACHE_DIR, READY_DIR):
+                    for файл in каталог.glob(f"*-{ident}-*.json"):
+                        файл.unlink(missing_ok=True)
+                        убрано += 1
+                return self._send({**ответ, "убрано_из_кэша": убрано})
             return self._error(f"нет такого пути: {url.path}", 404)
         except (NotFound, uploads.НетВыгрузки) as exc:
             return self._error(str(exc), 404)
