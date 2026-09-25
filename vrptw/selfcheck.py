@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -214,7 +215,7 @@ def _контрольные_не_читаются(корень: Path | None = No
     посторонние = sorted(p.name for p in ORDERS_DIR.iterdir()
                          if p.is_file() and p.name not in известные)
 
-    корень = корень or Path(__file__).resolve().parent
+    корень = корень or Path(__file__).resolve().parent.parent
     # Сам сторож каталог обходит — на то он и сторож; его не считаем.
     свой = Path(__file__).name
     for путь in sorted(корень.rglob("*.py")):
@@ -271,9 +272,18 @@ def _порог_приоритета(корень: Path | None = None) -> tuple[
         for фраза in запрещено:
             if фраза in низ:
                 плохо.append(f"{имя}: «{фраза}» — весами это не держится")
-        # Где про приоритет говорят, там обязаны назвать порог.
+        # Где про приоритет говорят, там обязаны назвать порог — и
+        # именно рядом с фразой, а не где-нибудь в файле. Раньше стояло
+        # `str(порог) not in текст`, то есть искалось вхождение цифр по
+        # всему документу: при весах (1, 7, 49) порог равен 6, документ
+        # по-прежнему говорил «99», а сторож молчал — цифра «6» в тексте
+        # где-нибудь да найдётся.
+        рядом = re.findall(r"(\d+)\s+нераспределённых", текст)
+        if рядом and any(int(ч) != порог for ч in рядом):
+            плохо.append(f"{имя}: сказано «{рядом[0]} нераспределённых», "
+                         f"а веса дают порог {порог}")
         if "приоритет" in низ and "нераспределённая авария" in низ \
-                and str(порог) not in текст:
+                and not рядом:
             плохо.append(f"{имя}: про приоритет сказано, а порог {порог} "
                          f"не назван")
     return плохо, порог
@@ -459,13 +469,38 @@ def _голые_assert(корень: Path | None = None) -> list[str]:
             # Файл, который не разбирается, сторож и не покрывает. Сейчас
             # таких нет; появится — увидим по этой же строке в обходе.
             continue
+        # Имена, которым присвоен результат `check_invariants`. Без них
+        # сторож видел только прямую запись `assert not
+        # plan.check_invariants(day)`, а канонический замерный вид —
+        # через переменную —
+        #
+        #     проблемы = план.check_invariants(день)
+        #     assert not проблемы, проблемы[:2]
+        #
+        # проходил мимо: в `test` там одно имя `проблемы`, и ни
+        # `check_invariants`, ни `require_valid` в нём нет. Таких мест
+        # нашлось 29, из них шесть едут в снимок — включая
+        # `приоритет.py` и `рекомендация-честно.py` круга 24 сентября,
+        # то есть скрипты, которыми сняты числа в ФТ и наверху
+        # `CLAUDE.md`. Под `python3 -O` вызов остаётся, но его результат
+        # перестаёт что-либо значить.
+        от_инварианта: set[str] = set()
+        for узел in ast.walk(дерево):
+            if isinstance(узел, ast.Assign) and isinstance(узел.value, ast.Call):
+                ф = узел.value.func
+                если_имя = getattr(ф, "attr", None) or getattr(ф, "id", None)
+                if если_имя in {"check_invariants", "require_valid"}:
+                    for цель in узел.targets:
+                        if isinstance(цель, ast.Name):
+                            от_инварианта.add(цель.id)
+
         for узел in ast.walk(дерево):
             if not isinstance(узел, ast.Assert):
                 continue
             имена = {n.attr for n in ast.walk(узел.test)
                      if isinstance(n, ast.Attribute)}
             имена |= {n.id for n in ast.walk(узел.test) if isinstance(n, ast.Name)}
-            if имена & {"check_invariants", "require_valid"}:
+            if имена & ({"check_invariants", "require_valid"} | от_инварианта):
                 плохие.append(f"{путь.relative_to(корень)}:{узел.lineno}")
     return плохие
 
@@ -1581,7 +1616,25 @@ def main() -> int:
     # Якорь берём из жадного плана — он детерминирован, поэтому расхождение
     # воспроизводится тем же запуском, а не «иногда».
     def seq_of(plan):
-        return {e: [v.order.id for v in r.visits] for e, r in plan.routes.items()}
+        # Не только маршруты, но и то, чем план себя объявляет. `to_plan`
+        # написан в каждой реализации свой (`fast.py` и `improved.py`),
+        # и метаданные они собирают порознь — а сверка до 25 сентября
+        # сравнивала одни последовательности визитов.
+        #
+        # Цена дыры измерена: если заставить `fast.to_plan` отдавать
+        # `stock=None`, все 22 набора остаются зелёными. А `Plan.stock` —
+        # это выключатель инварианта «в машине не больше, чем в ней
+        # есть»: одним словом боевому солверу молча снимается проверка
+        # оборудования, и ни сверка, ни отметка про оборудование этого
+        # не видят (вторая требует, чтобы солвер не бросил, — а с
+        # разоружённым инвариантом он и не бросает).
+        мета = (plan.duration_factor,
+                tuple(sorted((plan.pinned or {}).items())),
+                None if plan.stock is None else
+                tuple(sorted((e, tuple(sorted(v.items())))
+                             for e, v in plan.stock.items())))
+        return ({e: [v.order.id for v in r.visits] for e, r in plan.routes.items()},
+                мета)
 
     anchor = {v.order.id: eid for eid, r in plan_g.routes.items() for v in r.visits}
 
@@ -1900,9 +1953,16 @@ def main() -> int:
     rough = fast.solve(day, params=improved.Params(
         lns_seconds=0.0, lns_iterations=900, balance_weight=0.0), seed=1)
     b0, b1 = balance(day, rough), balance(day, plan_i)
-    if b1["occupancy_gini"] > b0["occupancy_gini"] + 1e-9:
+    # Требуем улучшения, а не «не ухудшения». Условие было
+    # односторонним (`b1 > b0` — красный), и равенство считалось
+    # успехом: с выключенным `balance_weight` отметка печатала бы
+    # «загрузка выравнивается: Джини 0.293 → 0.293» и была бы зелёной.
+    # Порог 0,01 — заметно больше шума округления и заметно меньше того,
+    # что даёт рабочий вес (на этом дне 0,293 → 0,150).
+    if b1["occupancy_gini"] > b0["occupancy_gini"] - 0.01:
         bad(f"штраф за неравномерность не выравнивает загрузку: "
-            f"Джини {b0['occupancy_gini']:.3f} → {b1['occupancy_gini']:.3f}")
+            f"Джини {b0['occupancy_gini']:.3f} → {b1['occupancy_gini']:.3f} "
+            f"(ждём убыли хотя бы на 0,01)")
     else:
         ok(f"загрузка выравнивается: Джини {b0['occupancy_gini']:.3f} → "
            f"{b1['occupancy_gini']:.3f}, занятость "

@@ -28,6 +28,7 @@ from vrptw.core.simulate import monte_carlo  # noqa: E402
 from vrptw.server import отпечаток_кода  # noqa: E402
 from vrptw.settings import Settings  # noqa: E402
 from vrptw.solvers import fast  # noqa: E402
+from vrptw.core.domain import require_valid
 
 ЗОНЫ = ("восток", "юго-восток", "югоцентр")
 ЗЁРНА = range(6)
@@ -48,8 +49,7 @@ def прогон(день, веса, зерно):
     p.lns_iterations = ШАГОВ
     p.priority_weights = веса
     план = fast.solve(день, params=p, seed=зерно)
-    проблемы = план.check_invariants(день)
-    assert not проблемы, проблемы[:2]
+    require_valid(план, день)
     по_ступеням = {k: 0 for k in СТУПЕНЬ}
     for o in план.unassigned:
         по_ступеням[o.priority] += 1

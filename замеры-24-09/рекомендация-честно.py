@@ -52,6 +52,7 @@ from vrptw import shiftopt  # noqa: E402
 from vrptw.core.load import load_day  # noqa: E402
 from vrptw.core.simulate import monte_carlo  # noqa: E402
 from vrptw.solvers import fast, improved  # noqa: E402
+from vrptw.core.domain import require_valid
 
 ЗОНЫ = ("восток", "юго-восток", "югоцентр")
 ОЦЕНКА = list(range(8, 16))        # зёрна оценки — отбор шёл на 0–7
@@ -85,8 +86,7 @@ def вариант(зона, имя):
 
 def замер(day, seed):
     p = fast.solve(day, params=ПАР, seed=seed)
-    беды = p.check_invariants(day)
-    assert not беды, беды[:2]
+    require_valid(p, day)
     mc = monte_carlo(day, p, runs=200, seed=100 + seed)
     m = p.metrics(day)
     return (m["assigned"], mc.done_mean, m["engineers_used"], m["km_total"],

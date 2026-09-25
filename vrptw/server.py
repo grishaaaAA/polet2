@@ -47,7 +47,7 @@ from .core.load import REGIONS, TRANSPORT_REQUIRED, load_day
 from . import uploads
 from .core.domain import (EQUIPMENT, REAL_WORK_TYPES, RESERVE_PER_TYPE,
                           SKILL_TITLES, TRANSPORT, Plan, Route, Visit,
-                          equipment_text)
+                          equipment_text, require_valid)
 from .core.network import default_network
 from .core.simulate import monte_carlo
 from .core.validate_day import check as validate_day_check
@@ -623,7 +623,13 @@ class Stand:
         starts, _ = refine(day, starts, solver_seed=rng,
                            sim_seed=rng + 7000, rounds=2, shift_len=None)
         tuned = apply_shifts(day, starts, shift_len=None)
-        tuned_plan = fast.solve(tuned, params=params, seed=rng)
+        # Инвариант и здесь: правило 2 говорит «на каждом отдаваемом
+        # плане», а этот план не отдаётся целиком — но его покрытие
+        # уезжает в `shifts.recommended.expected_coverage`, то есть на
+        # экран графика смен. Рядом, в `with_tuned_shifts`, ровно та же
+        # конструкция проверялась, а здесь нет: одно построение, два
+        # пути, сторож на одном.
+        tuned_plan = require_valid(fast.solve(tuned, params=params, seed=rng), tuned)
 
         coverage_now = monte_carlo(day, plan, runs=MC_RUNS, seed=rng).coverage * 100
         coverage_rec = monte_carlo(tuned, tuned_plan, runs=MC_RUNS,
